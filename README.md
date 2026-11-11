@@ -2,6 +2,8 @@
 
 A static app that uses GitHub's public REST API to rank external contributors by OpenClaw PRs merged this week. It shows P0–P3 priority labels, PR ratings, likely issue type, and project area. No API key or paid plan is required.
 
+Live app: https://harjothkhara.github.io/openclaw-contributor-pulse/
+
 Support: [harjoth.khara@gmail.com](mailto:harjoth.khara@gmail.com).
 
 ## Run locally
