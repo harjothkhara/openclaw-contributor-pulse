@@ -1,6 +1,13 @@
 const $ = selector => document.querySelector(selector);
-const cacheKey = 'openclaw-pulse-v1';
+const cacheKey = 'openclaw-pulse-v2';
+const todayCacheMs = 20 * 60000;
+// GitHub's search index can trail a merge by a few minutes, so a finished day is
+// only treated as final when it was fetched at least this long after midnight.
+const indexLagMs = 15 * 60000;
+const maxRateLimitWaitMs = 90000;
 const excluded = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+// Automation accounts registered as ordinary GitHub users, so user.type is not 'Bot'.
+const knownBots = new Set(['roboclaw-bot']);
 // OpenClaw Foundation staff and core maintainers listed at openclaw.org/people
 // on 2026-11-10, plus founder/steward @steipete.
 const knownMaintainers = new Set([
@@ -34,19 +41,57 @@ function nextDay(day) {
   return date;
 }
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// How long GitHub asks us to wait, from Retry-After or X-RateLimit-Reset.
+function rateLimitWait(response) {
+  const retryAfter = Number(response.headers.get('Retry-After'));
+  if (retryAfter > 0) return retryAfter * 1000;
+  const reset = Number(response.headers.get('X-RateLimit-Reset'));
+  if (reset > 0) return Math.max(0, reset * 1000 - Date.now()) + 1000;
+  return 60000;
+}
+
 async function search(start, end, page) {
-  const delay = 6500 - (Date.now() - lastRequest);
-  if (lastRequest && delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
   const q = `repo:openclaw/openclaw is:pr is:merged merged:${start.toISOString()}..${end.toISOString()}`;
   const url = new URL('https://api.github.com/search/issues');
-  url.search = new URLSearchParams({ q, per_page: '100', page: String(page), sort: 'updated', order: 'desc' });
-  lastRequest = Date.now();
-  const response = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
-  if (response.status === 403 || response.status === 429) throw new Error('GitHub’s API rate limit was reached. Try again later.');
-  if (!response.ok) throw new Error(`GitHub search failed (${response.status}).`);
-  const data = await response.json();
-  if (data.incomplete_results) throw new Error('GitHub returned incomplete results. Try again later.');
-  return data;
+  // Sort by creation date: unlike `updated`, it cannot reorder results between page requests.
+  url.search = new URLSearchParams({ q, per_page: '100', page: String(page), sort: 'created', order: 'asc' });
+  for (let attempt = 0; ; attempt++) {
+    const delay = 6500 - (Date.now() - lastRequest);
+    if (lastRequest && delay > 0) await sleep(delay);
+    lastRequest = Date.now();
+    const response = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
+    if (response.status === 403 || response.status === 429) {
+      const wait = rateLimitWait(response);
+      if (attempt > 0 || wait > maxRateLimitWaitMs) {
+        const at = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(Date.now() + wait);
+        throw new Error(`GitHub’s search rate limit was reached. Days already loaded are saved; refresh after ${at} to continue.`);
+      }
+      status(`GitHub’s search rate limit was reached. Resuming in ${Math.ceil(wait / 1000)} seconds…`);
+      await sleep(wait);
+      continue;
+    }
+    if (!response.ok) throw new Error(`GitHub search failed (${response.status}).`);
+    const data = await response.json();
+    if (data.incomplete_results) throw new Error('GitHub returned incomplete results. Try again later.');
+    return data;
+  }
+}
+
+// Keep only the fields the page renders, so a busy week fits in localStorage
+// (full search results are ~9 KB per PR, mostly PR bodies).
+function slim(pr) {
+  return {
+    id: pr.id,
+    number: pr.number,
+    title: pr.title,
+    html_url: pr.html_url,
+    author_association: pr.author_association,
+    pull_request: { merged_at: pr.pull_request?.merged_at },
+    user: pr.user && { login: pr.user.login, avatar_url: pr.user.avatar_url, type: pr.user.type },
+    labels: (pr.labels || []).map(label => ({ name: label.name }))
+  };
 }
 
 async function collectRange(start, end, found) {
@@ -58,24 +103,65 @@ async function collectRange(start, end, found) {
     await collectRange(middle, end, found);
     return;
   }
-  for (const pr of first.items) found.set(pr.id, pr);
-  status(`Checking merges… ${found.size} PRs loaded`);
+  for (const pr of first.items) found.set(pr.id, slim(pr));
+  status(`Checking merges… ${found.size} PRs loaded for ${dayName(start)}`);
   for (let page = 2; page <= Math.ceil(first.total_count / 100); page++) {
     const data = await search(start, end, page);
-    for (const pr of data.items) found.set(pr.id, pr);
-    status(`Checking merges… ${found.size} PRs loaded`);
+    for (const pr of data.items) found.set(pr.id, slim(pr));
+    status(`Checking merges… ${found.size} PRs loaded for ${dayName(start)}`);
   }
 }
 
-async function loadWeek(start, now) {
-  const found = new Map();
-  for (let day = new Date(start); day < now; day = nextDay(day)) {
-    await collectRange(day, new Date(Math.min(nextDay(day).getTime(), now.getTime())), found);
-  }
-  return [...found.values()].filter(pr => {
+const dayName = day => new Intl.DateTimeFormat(undefined, { weekday: 'long' }).format(day);
+
+function readCache(start) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+    if (cached?.start === start.toISOString() && cached.days) return cached;
+  } catch { /* Storage is optional. */ }
+  return { start: start.toISOString(), days: {} };
+}
+
+function writeCache(cache) {
+  try {
+    localStorage.removeItem('openclaw-pulse-v1');
+    localStorage.setItem(cacheKey, JSON.stringify(cache));
+  } catch { /* Storage is optional. */ }
+}
+
+// A day is reusable when it was fetched after it ended (it is final), or when it
+// is today and was fetched recently. Earlier days therefore load only once per week.
+function isFresh(entry, day, now) {
+  if (!entry) return false;
+  const dayEnd = nextDay(day).getTime();
+  if (entry.checkedAt >= dayEnd + indexLagMs) return true;
+  return dayEnd > now.getTime() && now.getTime() - entry.checkedAt < todayCacheMs;
+}
+
+function weekPrs(cache, start, now) {
+  const prs = Object.values(cache.days).flatMap(entry => entry.prs);
+  const unique = [...new Map(prs.map(pr => [pr.id, pr])).values()];
+  return unique.filter(pr => {
     const merged = pr.pull_request?.merged_at;
     return merged && new Date(merged) >= start && new Date(merged) <= now;
   });
+}
+
+// Fetches stale days one at a time and saves each as it finishes, so a rate-limit
+// failure keeps the days already loaded.
+async function loadWeek(start, now, cache, force) {
+  let fetched = 0;
+  for (let day = new Date(start); day < now; day = nextDay(day)) {
+    const key = day.toISOString();
+    if (!force && isFresh(cache.days[key], day, now)) continue;
+    const found = new Map();
+    const checkedAt = Date.now();
+    await collectRange(day, new Date(Math.min(nextDay(day).getTime(), now.getTime())), found);
+    cache.days[key] = { checkedAt, prs: [...found.values()] };
+    writeCache(cache);
+    fetched++;
+  }
+  return fetched;
 }
 
 const labels = pr => (pr.labels || []).map(label => label.name);
@@ -97,17 +183,30 @@ const areaRules = [
   ['Android', /\bandroid\b|\bkotlin\b/i],
   ['macOS / desktop', /\bmacos\b|\bdesktop\b|\bmenu bar\b|\bmenubar\b|\belectron\b/i],
   ['Web / UI', /\bweb\b|\bui\b|\bfrontend\b|\bbrowser\b|\bdashboard\b/i],
-  ['Gateway', /\bgateway\b|\bserver\b|\bstreaming\b/i],
+  ['Gateway', /\bgateway\b/i],
   ['Channels', /\btelegram\b|\bdiscord\b|\bslack\b|\bwhatsapp\b|\bchannel\b/i],
   ['Agents', /\bagents?\b|\bskills?\b/i],
   ['CLI', /\bcli\b|\bterminal\b|\btui\b/i],
   ['Docs', /\bdocs?\b|\bdocumentation\b/i],
   ['CI / release', /\bci\b|\brelease\b|\bworkflow\b|\bbuild\b/i]
 ];
+// OpenClaw's structured area labels, e.g. `app: web-ui`, `channel: discord`, `plugin: knowledge`.
+const labelAreas = [
+  ['iOS', /^app:\s*ios$/i],
+  ['Android', /^app:\s*android$/i],
+  ['macOS / desktop', /^app:\s*macos$/i],
+  ['Web / UI', /^app:\s*web-ui$/i],
+  ['Channels', /^channel:/i],
+  ['Plugins', /^(plugin|extensions):/i]
+];
 function areas(pr) {
-  const relevantLabels = labels(pr).filter(label => !/^(docs|documentation|scripts|agents)$/i.test(label));
+  const names = labels(pr);
+  const fromLabels = labelAreas.filter(([, re]) => names.some(name => re.test(name))).map(([name]) => name);
+  // Prefix-free labels like `docs`, `scripts`, and `agents` are applied too broadly to indicate an area.
+  const relevantLabels = names.filter(label => !/:/.test(label) && !/^(docs|documentation|scripts|agents)$/i.test(label));
   const text = `${pr.title} ${relevantLabels.join(' ')}`;
-  const hits = areaRules.filter(([, re]) => re.test(text)).map(([name]) => name);
+  const fromText = areaRules.filter(([, re]) => re.test(text)).map(([name]) => name);
+  const hits = [...new Set([...fromLabels, ...fromText])];
   return hits.length ? hits : ['Other / core'];
 }
 
@@ -173,8 +272,9 @@ function contributorCard(group, index, start) {
 
 function render(prs, start, checkedAt) {
   const isMaintainer = pr => excluded.has(pr.author_association) || knownMaintainers.has(pr.user?.login?.toLowerCase());
-  const maintainerCount = prs.filter(isMaintainer).length;
-  const external = prs.filter(pr => pr.user && !isMaintainer(pr) && pr.user.type !== 'Bot' && !/\[bot\]$/i.test(pr.user.login));
+  const isBot = pr => pr.user?.type === 'Bot' || /\[bot\]$/i.test(pr.user?.login || '') || knownBots.has(pr.user?.login?.toLowerCase());
+  const external = prs.filter(pr => pr.user && !isMaintainer(pr) && !isBot(pr));
+  const maintainerCount = prs.length - external.length;
   const grouped = new Map();
   for (const pr of external) {
     const key = pr.user.login.toLowerCase();
@@ -199,22 +299,21 @@ async function refresh(force = false) {
   const start = weekStart(now);
   $('#week-label').textContent = `Week of ${new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(start)} · your time zone`;
   $('#refresh').disabled = true;
+  const cache = readCache(start);
+  const checkedAt = () => Math.max(0, ...Object.values(cache.days).map(entry => entry.checkedAt));
   try {
-    let cached = null;
-    try { cached = JSON.parse(localStorage.getItem(cacheKey) || 'null'); } catch { /* Storage is optional. */ }
-    if (!force && cached?.start === start.toISOString() && Date.now() - cached.checkedAt < 20 * 60000) {
-      render(cached.prs, start, cached.checkedAt);
-      status('Showing a recent snapshot. Refresh for the latest merges.');
-      return;
-    }
     status('Checking this week’s OpenClaw merges…');
-    const prs = await loadWeek(start, now);
-    const checkedAt = Date.now();
-    render(prs, start, checkedAt);
-    try { localStorage.setItem(cacheKey, JSON.stringify({ start: start.toISOString(), checkedAt, prs })); } catch { /* Storage is optional. */ }
-    status(`Complete: ${prs.length.toLocaleString()} merged PRs checked across the week.`);
+    const fetched = await loadWeek(start, now, cache, force);
+    const prs = weekPrs(cache, start, now);
+    render(prs, start, checkedAt());
+    status(fetched
+      ? `Complete: ${prs.length.toLocaleString()} merged PRs checked across the week.`
+      : `Showing a recent snapshot of ${prs.length.toLocaleString()} merged PRs. Refresh for the latest merges.`);
   } catch (error) {
-    status(error.message || 'Could not load GitHub data.', true);
+    const loaded = Object.keys(cache.days).length;
+    if (loaded) render(weekPrs(cache, start, now), start, checkedAt());
+    const partial = loaded ? ` Showing ${loaded} of ${Math.ceil((now - start) / 86400000)} days.` : '';
+    status((error.message || 'Could not load GitHub data.') + partial, true);
   } finally {
     $('#refresh').disabled = false;
   }
