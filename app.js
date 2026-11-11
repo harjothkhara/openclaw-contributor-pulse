@@ -147,16 +147,53 @@ function weekPrs(cache, start, now) {
   });
 }
 
+// data.json is rebuilt every 30 minutes by .github/workflows/pages.yml. It holds
+// PRs merged from `from` to `generatedAt`; it is missing when the page runs locally
+// or the snapshot build failed, and then every day is searched directly.
+async function loadSnapshot() {
+  try {
+    const response = await fetch('./data.json', { cache: 'no-cache' });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const from = Date.parse(data?.from);
+    const generatedAt = Date.parse(data?.generatedAt);
+    if (!from || !generatedAt || !Array.isArray(data.prs)) return null;
+    return { from, generatedAt, prs: data.prs };
+  } catch {
+    return null;
+  }
+}
+
+// Fills one day from the snapshot, then searches only for merges after it. The
+// search overlaps the snapshot by the index lag so late-indexed merges are not lost.
+async function loadDay(day, end, snapshot, found) {
+  if (!snapshot || snapshot.from > day.getTime()) {
+    await collectRange(day, end, found);
+    return Date.now();
+  }
+  const dayEnd = nextDay(day).getTime();
+  for (const pr of snapshot.prs) {
+    const merged = Date.parse(pr.pull_request?.merged_at);
+    if (merged >= day.getTime() && merged < dayEnd) found.set(pr.id, pr);
+  }
+  const deltaStart = Math.max(day.getTime(), snapshot.generatedAt - indexLagMs);
+  if (deltaStart >= end.getTime()) return snapshot.generatedAt;
+  const checkedAt = Date.now();
+  await collectRange(new Date(deltaStart), end, found);
+  return checkedAt;
+}
+
 // Fetches stale days one at a time and saves each as it finishes, so a rate-limit
 // failure keeps the days already loaded.
 async function loadWeek(start, now, cache, force) {
   let fetched = 0;
+  let snapshot;
   for (let day = new Date(start); day < now; day = nextDay(day)) {
     const key = day.toISOString();
     if (!force && isFresh(cache.days[key], day, now)) continue;
+    if (snapshot === undefined) snapshot = await loadSnapshot();
     const found = new Map();
-    const checkedAt = Date.now();
-    await collectRange(day, new Date(Math.min(nextDay(day).getTime(), now.getTime())), found);
+    const checkedAt = await loadDay(day, new Date(Math.min(nextDay(day).getTime(), now.getTime())), snapshot, found);
     cache.days[key] = { checkedAt, prs: [...found.values()] };
     writeCache(cache);
     fetched++;

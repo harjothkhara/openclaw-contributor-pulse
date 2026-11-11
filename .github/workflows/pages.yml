@@ -1,0 +1,70 @@
+name: Build and deploy Pages
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Refresh the merged-PR snapshot every 30 minutes. GitHub may delay scheduled runs.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          mkdir _site
+          cp index.html app.js styles.css .nojekyll _site/
+
+      - name: Build merged-PR snapshot
+        id: data
+        # A failed snapshot must not block shipping code changes: the page falls back
+        # to searching GitHub directly when data.json is missing.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/build-data.mjs _site/data.json
+
+      - name: Decide whether to deploy
+        id: decide
+        # On a schedule, a failed snapshot leaves the previous deployment (and its data.json) in place.
+        run: |
+          if [ "${{ steps.data.outcome }}" = "success" ] || [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Snapshot build failed; keeping the previous deployment."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/configure-pages@v5
+        if: steps.decide.outputs.deploy == 'true'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.decide.outputs.deploy == 'true'
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
