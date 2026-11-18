@@ -57,6 +57,7 @@ function slim(pr) {
     author_association: pr.author_association,
     pull_request: { merged_at: pr.pull_request?.merged_at },
     user: pr.user && { login: pr.user.login, avatar_url: pr.user.avatar_url, type: pr.user.type },
+    assignees: (pr.assignees || []).map(user => ({ login: user.login, avatar_url: user.avatar_url })),
     labels: (pr.labels || []).map(label => ({ name: label.name }))
   };
 }

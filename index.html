@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0b111d" />
-  <meta name="description" content="Weekly OpenClaw external contributor leaderboard powered by the GitHub API." />
+  <meta name="description" content="Weekly OpenClaw contributor and maintainer activity powered by the GitHub API." />
   <title>OpenClaw Contributor Pulse</title>
   <link rel="stylesheet" href="./styles.css" />
   <script src="./app.js" defer></script>
@@ -19,7 +19,7 @@
       <section class="hero">
         <div class="eyebrow"><span class="live-dot"></span> GITHUB API · WEEKLY OPEN SOURCE ACTIVITY</div>
         <h1>Who shipped<br /><em>OpenClaw this week?</em></h1>
-        <p>A live look at external contributors with merged PRs, their priority and rating labels, and the areas they worked on.</p>
+        <p>A live look at external contributors and maintainers: merged PRs, priority and rating labels, assignments, and the areas they worked on.</p>
         <div class="hero-actions">
           <button id="refresh" type="button">Refresh this week <span aria-hidden="true">↗</span></button>
           <span id="week-label" class="week-label"></span>
@@ -31,7 +31,7 @@
         <div class="metrics">
           <div class="metric"><span>External merged PRs</span><strong id="external-count">—</strong></div>
           <div class="metric"><span>Contributors</span><strong id="contributor-count">—</strong></div>
-          <div class="metric"><span>Maintainer &amp; bot PRs excluded</span><strong id="maintainer-count">—</strong></div>
+          <div class="metric"><span>Maintainer-authored merged PRs</span><strong id="maintainer-count">—</strong></div>
           <div class="metric"><span>Last checked</span><strong id="checked-at" class="metric-date">—</strong></div>
         </div>
         <div class="section-heading">
@@ -39,7 +39,15 @@
           <a id="all-prs-link" class="all-link" target="_blank" rel="noopener noreferrer">All merged PRs ↗</a>
         </div>
         <div id="leaderboard" class="leaderboard"></div>
-        <p class="footnote">Priority and PR rating come from GitHub labels; “unlabeled” means no matching label was found. Type uses a label when present, then a clearly marked title-based estimate. Area tags come from OpenClaw’s <code>app:</code>, <code>channel:</code>, <code>plugin:</code>, and <code>extensions:</code> labels, plus estimates from titles; file paths are not fetched. “External” excludes GitHub OWNER, MEMBER, and COLLABORATOR PRs, bot accounts (including automation accounts registered as regular users), and a <a href="https://www.openclaw.org/people" target="_blank" rel="noopener noreferrer">published OpenClaw maintainer roster</a> captured November 10, 2026. Roster changes may require an app update.</p>
+        <div class="section-heading maintainer-heading">
+          <div><p class="card-label">MERGED PRS AND ASSIGNMENTS</p><h2>Maintainer activity</h2><p class="section-note">Areas touched by their own merged PRs and merged PRs assigned to them this week.</p></div>
+          <label class="area-control" for="area-filter">Area
+            <select id="area-filter"><option value="">All areas</option></select>
+          </label>
+        </div>
+        <p class="routing-note">Use this board to understand recent area activity. <a href="https://github.com/openclaw/openclaw/blob/main/CONTRIBUTING.md#issue-pr-and-contact-routing" target="_blank" rel="noopener noreferrer">OpenClaw’s contribution guide</a> says to let labels, automation, and <a href="https://github.com/openclaw/openclaw/blob/main/.github/CODEOWNERS" target="_blank" rel="noopener noreferrer">CODEOWNERS</a> route normal reviews, and to mention a maintainer only when a documented responsibility is directly relevant to a decision. GitHub usernames here are not verified Discord handles.</p>
+        <div id="maintainer-board" class="leaderboard"></div>
+        <p class="footnote">“Merged PRs” here means PRs authored by that person that were merged this week; GitHub Search does not say who pressed Merge. “Assigned” counts only merged PRs with that maintainer listed as an assignee, not their open issue queue or permanent area ownership. Priority and PR rating come from GitHub labels; type and area may be estimates from labels and titles. The maintainer group uses GitHub OWNER, MEMBER, and COLLABORATOR associations plus a <a href="https://www.openclaw.org/people" target="_blank" rel="noopener noreferrer">published OpenClaw roster</a> checked November 17, 2026. Bots are omitted. Roster changes may require an app update.</p>
       </section>
     </main>
     <footer>Independent community view. Public data from the GitHub REST API. No login, token, or paid plan required. <a href="mailto:harjoth.khara@gmail.com">Support</a>.</footer>

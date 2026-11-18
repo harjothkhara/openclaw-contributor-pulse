@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const cacheKey = 'openclaw-pulse-v2';
+const cacheKey = 'openclaw-pulse-v3';
 const todayCacheMs = 20 * 60000;
 // GitHub's search index can trail a merge by a few minutes, so a finished day is
 // only treated as final when it was fetched at least this long after midnight.
@@ -9,7 +9,7 @@ const excluded = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 // Automation accounts registered as ordinary GitHub users, so user.type is not 'Bot'.
 const knownBots = new Set(['roboclaw-bot']);
 // OpenClaw Foundation staff and core maintainers listed at openclaw.org/people
-// on 2026-11-10, plus founder/steward @steipete.
+// on 2026-11-17, plus founder/steward @steipete.
 const knownMaintainers = new Set([
   'steipete', 'vincentkoc', 'obviyus', 'joshavant', 'jalehman',
   'patrick-erichsen', 'vyctorbrzezowski',
@@ -90,6 +90,7 @@ function slim(pr) {
     author_association: pr.author_association,
     pull_request: { merged_at: pr.pull_request?.merged_at },
     user: pr.user && { login: pr.user.login, avatar_url: pr.user.avatar_url, type: pr.user.type },
+    assignees: (pr.assignees || []).map(user => ({ login: user.login, avatar_url: user.avatar_url })),
     labels: (pr.labels || []).map(label => ({ name: label.name }))
   };
 }
@@ -125,6 +126,7 @@ function readCache(start) {
 function writeCache(cache) {
   try {
     localStorage.removeItem('openclaw-pulse-v1');
+    localStorage.removeItem('openclaw-pulse-v2');
     localStorage.setItem(cacheKey, JSON.stringify(cache));
   } catch { /* Storage is optional. */ }
 }
@@ -261,6 +263,18 @@ function frequencies(values) {
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
 
+function appendPrItems(parent, prs, limit = 8) {
+  for (const pr of prs.slice(0, limit)) {
+    const item = element(parent, 'div', '', 'pr-item');
+    const link = element(item, 'a', `#${pr.number} ${pr.title}`);
+    link.href = pr.html_url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    const tags = element(item, 'div', '', 'pr-labels');
+    [priority(pr), type(pr), rating(pr), ...areas(pr).slice(0, 2)].forEach(value => chip(tags, value));
+  }
+}
+
 function contributorCard(group, index, start) {
   const card = document.createElement('details');
   card.className = 'contributor';
@@ -290,15 +304,7 @@ function contributorCard(group, index, start) {
   const areaChips = element(areaBlock, 'div', '', 'chips');
   for (const [name, count] of frequencies(group.prs.flatMap(areas)).slice(0, 5)) chip(areaChips, `${name} · ${count}`);
   const links = element(details, 'div', '', 'pr-links');
-  for (const pr of group.prs.slice(0, 8)) {
-    const item = element(links, 'div', '', 'pr-item');
-    const link = element(item, 'a', `#${pr.number} ${pr.title}`);
-    link.href = pr.html_url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    const tags = element(item, 'div', '', 'pr-labels');
-    [priority(pr), type(pr), rating(pr), ...areas(pr).slice(0, 2)].forEach(value => chip(tags, value));
-  }
+  appendPrItems(links, group.prs);
   const q = `repo:openclaw/openclaw is:pr is:merged author:${group.user.login} merged:>=${start.toISOString()}`;
   const more = element(details, 'a', 'View all this week on GitHub ↗', 'more-link');
   more.href = `https://github.com/search?q=${encodeURIComponent(q)}&type=pullrequests`;
@@ -307,11 +313,70 @@ function contributorCard(group, index, start) {
   return card;
 }
 
+function maintainerCard(group, index, start) {
+  const card = element(document.createDocumentFragment(), 'details', '', 'contributor');
+  card.open = index < 3;
+  const summary = element(card, 'summary', '');
+  element(summary, 'span', `#${index + 1}`, 'rank');
+  const avatar = element(summary, 'img', '', 'avatar');
+  avatar.src = group.user.avatar_url;
+  avatar.alt = '';
+  avatar.loading = 'lazy';
+  const person = element(summary, 'div', '', 'person');
+  element(person, 'strong', `@${group.user.login}`);
+  const touched = new Map([...group.prs, ...group.assigned].map(pr => [pr.id, pr]));
+  element(person, 'small', frequencies([...touched.values()].flatMap(areas)).slice(0, 2).map(([name]) => name).join(' · '));
+  const total = element(summary, 'div', '', 'total');
+  element(total, 'strong', String(group.prs.length));
+  element(total, 'small', 'own PRs merged');
+  element(summary, 'span', `${group.assigned.length} assigned`, 'assign-count');
+  element(summary, 'span', '⌄', 'chevron');
+
+  const details = element(card, 'div', '', 'details');
+  const row = element(details, 'div', '', 'detail-row');
+  for (const [heading, items] of [['Areas of own merged PRs', group.prs], ['Areas of assigned merged PRs', group.assigned]]) {
+    const block = element(row, 'div', '', 'detail-block');
+    element(block, 'h3', heading);
+    const chips = element(block, 'div', '', 'chips');
+    if (!items.length) chip(chips, 'None this week');
+    else for (const [name, count] of frequencies(items.flatMap(areas)).slice(0, 6)) chip(chips, `${name} · ${count}`);
+  }
+  if (group.prs.length) {
+    element(details, 'h3', 'PRs authored and merged', 'detail-heading');
+    appendPrItems(element(details, 'div', '', 'pr-links'), group.prs, 6);
+    const q = `repo:openclaw/openclaw is:pr is:merged author:${group.user.login} merged:>=${start.toISOString()}`;
+    const more = element(details, 'a', 'See all own merged PRs ↗', 'more-link');
+    more.href = `https://github.com/search?q=${encodeURIComponent(q)}&type=pullrequests`;
+    more.target = '_blank';
+    more.rel = 'noopener noreferrer';
+  }
+  if (group.assigned.length) {
+    element(details, 'h3', 'Assigned on these merged PRs', 'detail-heading');
+    appendPrItems(element(details, 'div', '', 'pr-links'), group.assigned, 6);
+  }
+  return card;
+}
+
+let maintainerGroups = [];
+let renderedWeekStart;
+function renderMaintainers(area = '') {
+  const board = $('#maintainer-board');
+  board.replaceChildren();
+  const groups = maintainerGroups.map(group => ({
+    ...group,
+    prs: area ? group.prs.filter(pr => areas(pr).includes(area)) : group.prs,
+    assigned: area ? group.assigned.filter(pr => areas(pr).includes(area)) : group.assigned
+  })).filter(group => group.prs.length || group.assigned.length)
+    .sort((a, b) => b.prs.length - a.prs.length || b.assigned.length - a.assigned.length || a.user.login.localeCompare(b.user.login));
+  if (!groups.length) element(board, 'p', 'No maintainer authored or assigned merged PRs in this area yet this week.', 'empty');
+  else groups.forEach((group, index) => board.append(maintainerCard(group, index, renderedWeekStart)));
+}
+
 function render(prs, start, checkedAt) {
   const isMaintainer = pr => excluded.has(pr.author_association) || knownMaintainers.has(pr.user?.login?.toLowerCase());
   const isBot = pr => pr.user?.type === 'Bot' || /\[bot\]$/i.test(pr.user?.login || '') || knownBots.has(pr.user?.login?.toLowerCase());
   const external = prs.filter(pr => pr.user && !isMaintainer(pr) && !isBot(pr));
-  const maintainerCount = prs.length - external.length;
+  const maintainerPrs = prs.filter(pr => pr.user && isMaintainer(pr) && !isBot(pr));
   const grouped = new Map();
   for (const pr of external) {
     const key = pr.user.login.toLowerCase();
@@ -321,13 +386,37 @@ function render(prs, start, checkedAt) {
   const ranked = [...grouped.values()].sort((a, b) => b.prs.length - a.prs.length || a.user.login.localeCompare(b.user.login));
   $('#external-count').textContent = external.length.toLocaleString();
   $('#contributor-count').textContent = ranked.length.toLocaleString();
-  $('#maintainer-count').textContent = maintainerCount.toLocaleString();
+  $('#maintainer-count').textContent = maintainerPrs.length.toLocaleString();
   $('#checked-at').textContent = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(checkedAt));
   const q = `repo:openclaw/openclaw is:pr is:merged merged:>=${start.toISOString()}`;
   $('#all-prs-link').href = `https://github.com/search?q=${encodeURIComponent(q)}&type=pullrequests`;
   $('#leaderboard').replaceChildren();
   if (!ranked.length) element($('#leaderboard'), 'p', 'No external merged PRs yet this week.', 'empty');
   else ranked.forEach((group, index) => $('#leaderboard').append(contributorCard(group, index, start)));
+
+  const maintainers = new Map();
+  const getMaintainer = user => {
+    const key = user.login.toLowerCase();
+    if (!maintainers.has(key)) maintainers.set(key, { user, prs: [], assigned: [] });
+    return maintainers.get(key);
+  };
+  for (const pr of maintainerPrs) getMaintainer(pr.user).prs.push(pr);
+  const activeMaintainers = new Set([...knownMaintainers, ...maintainers.keys()]);
+  for (const pr of prs) {
+    for (const assignee of pr.assignees || []) {
+      if (activeMaintainers.has(assignee.login.toLowerCase()) && !knownBots.has(assignee.login.toLowerCase())) {
+        getMaintainer(assignee).assigned.push(pr);
+      }
+    }
+  }
+  maintainerGroups = [...maintainers.values()];
+  renderedWeekStart = start;
+  const select = $('#area-filter');
+  const selected = select.value;
+  const areaNames = [...new Set(maintainerGroups.flatMap(group => [...group.prs, ...group.assigned].flatMap(areas)))].sort();
+  select.replaceChildren(new Option('All areas', ''), ...areaNames.map(name => new Option(name, name)));
+  select.value = areaNames.includes(selected) ? selected : '';
+  renderMaintainers(select.value);
   $('#results').hidden = false;
 }
 
@@ -357,4 +446,5 @@ async function refresh(force = false) {
 }
 
 $('#refresh').addEventListener('click', () => refresh(true));
+$('#area-filter').addEventListener('change', event => renderMaintainers(event.target.value));
 refresh();
